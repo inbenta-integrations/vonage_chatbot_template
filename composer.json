@@ -1,0 +1,18 @@
+{
+    "repositories": [
+        {
+            "type": "vcs",
+            "url": "git@github.com:inbenta-integrations/chatbot_api_connector.git"
+        }
+    ],
+    "require": {
+        "inbenta/chatbot-api-connector": "~1.2.0",
+        "php": "~7.1",
+        "spatie/opening-hours": "^2.7"
+    },
+    "autoload":{
+        "psr-4":{
+            "Inbenta\\NexmoConnector\\": "lib/NexmoConnector"
+        }
+    }
+}
