@@ -1,3 +1,3 @@
 <?php
 
-include "../events.php";
+require "../events.php";

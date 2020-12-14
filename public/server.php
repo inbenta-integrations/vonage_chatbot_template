@@ -1,3 +1,3 @@
 <?php
 
-include "../server.php";
+require "../server.php";

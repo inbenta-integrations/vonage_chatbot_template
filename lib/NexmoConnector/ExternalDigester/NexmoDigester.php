@@ -18,6 +18,7 @@ class NexmoDigester extends DigesterInterface
         'attachment',
         'location'
     );
+    protected $attachableFormats = ['jpg', 'jpeg', 'png', 'gif', 'pdf', 'xls', 'xlsx', 'mp4', 'avi', 'mp3', 'aac'];
 
     public function __construct($langManager, $conf, $session)
     {
@@ -40,8 +41,6 @@ class NexmoDigester extends DigesterInterface
      **/
     public static function checkRequest($request)
     {
-        // TODO check Request
-        // It is no being used
         $request = json_decode($request);
         $isPage    = isset($request->object) && $request->object == 'page';
         $isMessaging = isset($request->entry) && isset($request->entry[0]) && isset($request->entry[0]->messaging);
@@ -63,19 +62,83 @@ class NexmoDigester extends DigesterInterface
 
         $messages[] = $request;
         $output = [];
+        if ($this->session->has('options')) {
+            $lastUserQuestion = $this->session->get('lastUserQuestion');
+            $options = $this->session->get('options');
 
-        foreach ($messages as $msg) {
-            $msgType = $this->checkExternalMessageType($msg);
-            $digester = 'digestFromNexmo' . ucfirst($msgType);
+            $this->session->delete('options');
+            $this->session->delete('lastUserQuestion');
+            $this->session->delete('hasRelatedContent');
 
-            //Check if there are more than one responses from one incoming message
-            $digestedMessage = $this->$digester($msg);
-            if (isset($digestedMessage['multiple_output'])) {
-                foreach ($digestedMessage['multiple_output'] as $message) {
-                    $output[] = $message;
+            if (isset($request->message->content) && isset($request->message->content->type) && $request->message->content->type === "text") {
+                $userMessage = $request->message->content->text;
+
+                $selectedOption = false;
+                $selectedOptionText = "";
+                $isRelatedContent = false;
+                $isListValues = false;
+                $isPolar = false;
+                $optionSelected = false;
+
+                foreach ($options as $option) {
+                    if (isset($option->list_values)) {
+                        $isListValues = true;
+                    } else if (isset($option->related_content)) {
+                        $isRelatedContent = true;
+                    } else if (isset($option->is_polar)) {
+                        $isPolar = true;
+                    }
+                    if ($userMessage == $option->opt_key || strtolower($userMessage) == strtolower($option->label)) {
+                        if ($isListValues || $isRelatedContent) {
+                            $selectedOptionText = $option->label;
+                        } else {
+                            $selectedOption = $option;
+                        }
+                        $optionSelected = true;
+                        break;
+                    }
                 }
-            } else {
-                $output[] = $digestedMessage;
+
+                if (!$optionSelected) {
+                    if ($isListValues) { //Set again options for variable
+                        $this->session->set('options', $options);
+                        $this->session->set('lastUserQuestion', $lastUserQuestion);
+                    } else if ($isPolar) { //For polar, on wrong answer, goes for NO
+                        $request->message->content->text = "No";
+                    }
+                }
+
+                if ($selectedOption) {
+                    $output[] = ['option' => $selectedOption->value];
+                } else if ($selectedOptionText !== "") {
+                    $output[] = ['message' => $selectedOptionText];
+                } else {
+                    $output[] = ['message' => $request->message->content->text];
+                }
+            }
+        } else {
+            foreach ($messages as $msg) {
+                $msgType = $this->checkExternalMessageType($msg);
+                $digestedMessage = [];
+                switch ($msgType) {
+                    case 'text':
+                        $digestedMessage = $this->digestFromNexmoText($msg);
+                        break;
+                    case 'attachment':
+                        $digestedMessage = $this->digestFromNexmoAttachment($msg);
+                        break;
+                    case 'location':
+                        $digestedMessage = $this->digestFromNexmoLocation($msg);
+                        break;
+                }
+                //Check if there are more than one responses from one incoming message
+                if (isset($digestedMessage['multiple_output'])) {
+                    foreach ($digestedMessage['multiple_output'] as $message) {
+                        $output[] = $message;
+                    }
+                } else {
+                    $output[] = $digestedMessage;
+                }
             }
         }
         return $output;
@@ -89,7 +152,7 @@ class NexmoDigester extends DigesterInterface
         //Parse request messages
         if (isset($request->answers) && is_array($request->answers)) {
             $messages = $request->answers;
-        } elseif ($this->checkApiMessageType($request) !== null) {
+        } elseif (!is_null($this->checkApiMessageType($request))) {
             $messages = array('answers' => $request);
         } else {
             throw new Exception("Unknown ChatbotAPI response: " . json_encode($request, true));
@@ -97,11 +160,22 @@ class NexmoDigester extends DigesterInterface
 
         $output = [];
         foreach ($messages as $msg) {
-            if (!isset($msg->message) || $msg->message === "") continue;
             $msgType = $this->checkApiMessageType($msg);
-            $digester = 'digestFromApi' . ucfirst($msgType);
-            $digestedMessage = $this->$digester($msg, $lastUserQuestion);
-
+            $digestedMessage = [];
+            switch ($msgType) {
+                case 'answer':
+                    $digestedMessage = $this->digestFromApiAnswer($msg, $lastUserQuestion);
+                    break;
+                case 'polarQuestion':
+                    $digestedMessage = $this->digestFromApiPolarQuestion($msg, $lastUserQuestion);
+                    break;
+                case 'multipleChoiceQuestion':
+                    $digestedMessage = $this->digestFromApiMultipleChoiceQuestion($msg, $lastUserQuestion);
+                    break;
+                case 'extendedContentsAnswer':
+                    $digestedMessage = $this->digestFromApiExtendedContentsAnswer($msg);
+                    break;
+            }
             //Check if there are more than one responses from one incoming message
             if (isset($digestedMessage['multiple_output'])) {
                 foreach ($digestedMessage['multiple_output'] as $message) {
@@ -119,11 +193,21 @@ class NexmoDigester extends DigesterInterface
      **/
     protected function checkExternalMessageType($message)
     {
+        $responseType = "";
         foreach ($this->externalMessageTypes as $type) {
-            $checker = 'isNexmo' . ucfirst($type);
-
-            if ($this->$checker($message)) {
-                return $type;
+            switch ($type) {
+                case 'text':
+                    $responseType = $this->isNexmoText($message) ? $type : "";
+                    break;
+                case 'attachment':
+                    $responseType = $this->isNexmoAttachment($message) ? $type : "";
+                    break;
+                case 'location':
+                    $responseType = $this->isNexmoLocation($message) ? $type : "";
+                    break;
+            }
+            if ($responseType !== "") {
+                return $responseType;
             }
         }
         throw new Exception('Unknown Nexmo message type');
@@ -134,18 +218,30 @@ class NexmoDigester extends DigesterInterface
      **/
     protected function checkApiMessageType($message)
     {
+        $responseType = null;
         foreach ($this->apiMessageTypes as $type) {
-            $checker = 'isApi' . ucfirst($type);
-
-            if ($this->$checker($message)) {
-                return $type;
+            switch ($type) {
+                case 'answer':
+                    $responseType = $this->isApiAnswer($message) ? $type : null;
+                    break;
+                case 'polarQuestion':
+                    $responseType = $this->isApiPolarQuestion($message) ? $type : null;
+                    break;
+                case 'multipleChoiceQuestion':
+                    $responseType = $this->isApiMultipleChoiceQuestion($message) ? $type : null;
+                    break;
+                case 'extendedContentsAnswer':
+                    $responseType = $this->isApiExtendedContentsAnswer($message) ? $type : null;
+                    break;
+            }
+            if (!is_null($responseType)) {
+                return $responseType;
             }
         }
-        return null;
+        throw new Exception("Unknown ChatbotAPI response");
     }
 
     /********************** EXTERNAL MESSAGE TYPE CHECKERS **********************/
-    // TODO Type chek
     protected function isNexmoText($message)
     {
         $isText = isset($message->message)
@@ -236,7 +332,7 @@ class NexmoDigester extends DigesterInterface
         if ($data->name) {
             $message = $data->name . ', ' . $data->address . ' ' . $data->url;
         } else {
-            $message = 'https://www.google.com/maps/search/?api=1&query='.$data->lat.','.$data->long;
+            $message = 'https://www.google.com/maps/search/?api=1&query=' . $data->lat . ',' . $data->long;
         }
         return array(
             'message' => $message
@@ -245,33 +341,62 @@ class NexmoDigester extends DigesterInterface
 
     /********************** CHATBOT API MESSAGE DIGESTERS **********************/
 
-    protected function digestFromApiAnswer($message)
+    protected function digestFromApiAnswer($message, $lastUserQuestion)
     {
-        $output = array();
+        $output = [];
         $urlButtonSetting = isset($this->conf['url_buttons']['attribute_name'])
             ? $this->conf['url_buttons']['attribute_name']
             : '';
 
-        if (strpos($message->message, '<img') !== false) {
-            // Handle a message that contains an image (<img> tag)
-            $output['multiple_output'] = $this->handleMessageWithImages($message);
-        } elseif (isset($message->attributes->$urlButtonSetting) && !empty($message->attributes->$urlButtonSetting)) {
+        if (isset($message->attributes->$urlButtonSetting) && !empty($message->attributes->$urlButtonSetting)) {
             // Send a button that opens an URL
             $output = $this->buildUrlButtonMessage($message, $message->attributes->$urlButtonSetting);
         } else {
-            // Add simple text-answer
-            $output = [
-                'type' => 'text',
-                'text' => trim(html_entity_decode(strip_tags($message->message), ENT_COMPAT, "UTF-8"))
+            $message_txt = $message->message;
+            if (isset($message->attributes->SIDEBUBBLE_TEXT) && !empty($message->attributes->SIDEBUBBLE_TEXT)) {
+                $message_txt .= "\n" . $message->attributes->SIDEBUBBLE_TEXT;
+            }
+
+            $output_tmp = [
+                "multiple_output" => [
+                    [
+                        'type' => 'text',
+                        'text' => $message_txt
+                    ]
+                ]
             ];
+
+            $multiple = false;
+            if (strpos($message_txt, '<img') !== false || strpos($message_txt, '<iframe') !== false) {
+                $output_tmp = $this->handleMessageWithImgOrIframe($message_txt);
+                $multiple = true;
+            }
+
+            $last_text_message = 0;
+            foreach ($output_tmp["multiple_output"] as $key => $value) {
+                if (isset($value['type']) && $value['type'] == 'text') {
+                    $last_text_message = $key;
+                }
+            }
+            foreach ($output_tmp["multiple_output"] as $key => $value) {
+                if (isset($value['type']) && $value['type'] == 'text') {
+                    if ($key == $last_text_message) { //Inserts at the end: related content or action field)
+                        $this->handleMessageWithActionField($message, $value['text'], $lastUserQuestion);
+                        $this->handleMessageWithRelatedContent($message, $value['text'], $lastUserQuestion);
+                    }
+                    $this->handleMessageWithLinks($value['text']);
+                    $this->handleMessageWithTextFormat($value['text']);
+                    $output_tmp["multiple_output"][$key]["text"] = $this->formatFinalMessage($value['text']);
+                }
+            }
+            $output = $multiple ? $output_tmp : $output_tmp["multiple_output"][0];
         }
         return $output;
     }
 
     protected function digestFromApiPolarQuestion($message, $lastUserQuestion)
     {
-        $response = ['type' => 'text', 'text' => $message->message];
-        return $response;
+        return $this->digestFromApiMultipleChoiceQuestion($message, $lastUserQuestion, true);
     }
 
     protected function digestFromApiExtendedContentsAnswer($message)
@@ -284,15 +409,27 @@ class NexmoDigester extends DigesterInterface
         return $response;
     }
 
-    protected function digestFromApiMultipleChoiceQuestion($message, $lastUserQuestion)
+    protected function digestFromApiMultipleChoiceQuestion($message, $lastUserQuestion, $isPolar = false)
     {
-        $response['multiple_output'][] = ['type' => 'text', 'text' => $message->message];
-        foreach ($message->options as $option) {
-            $response['multiple_output'][] = ['type' => 'text', 'text' => $option->attributes->title];
+        $output = [
+            "type" => "text",
+            "text" => $this->formatFinalMessage($message->message)
+        ];
+
+        $options = $message->options;
+        foreach ($options as $i => &$option) {
+            $option->opt_key = $i + 1;
+            if (isset($option->attributes->title) && !$isPolar) {
+                $option->title = $option->attributes->title;
+            } else if ($isPolar) {
+                $option->is_polar = true;
+            }
+            $output['text'] .= "\n" . $option->opt_key . ') ' . $option->label;
         }
+        $this->session->set('options', $options);
+        $this->session->set('lastUserQuestion', $lastUserQuestion);
 
-
-        return $response;
+        return $output;
     }
 
     /********************** MISC **********************/
@@ -310,32 +447,65 @@ class NexmoDigester extends DigesterInterface
     }
 
     /**
+     * Validate if the message has images or iframes
+     */
+    public function handleMessageWithImgOrIframe($message_txt)
+    {
+        $output = [];
+        $images = [];
+        $iframes = [];
+        $output["multiple_output"] = [];
+        if (strpos($message_txt, '<img') !== false) {
+            $images = $this->handleMessageWithImages($message_txt);
+            $message_txt = $images["text_carried"];
+            unset($images["text_carried"]);
+        }
+        if (strpos($message_txt, '<iframe') !== false) {
+            $iframes = $this->handleMessageWithIframe($message_txt);
+        }
+        foreach ($images as $image) {
+            $output["multiple_output"][] = $image;
+        }
+        foreach ($iframes as $iframe) {
+            $output["multiple_output"][] = $iframe;
+        }
+        return $output;
+    }
+
+    /**
      *	Splits a message that contains an <img> tag into text/image/text and displays them in Nexmo
      */
-    protected function handleMessageWithImages($message)
+    protected function handleMessageWithImages($text)
     {
-        //Remove \t \n \r and HTML tags (keeping <img> tags)
-        $text = str_replace(["\r\n", "\r", "\n", "\t"], '', strip_tags($message->message, "<img>"));
         //Capture all IMG tags
         preg_match_all('/<\s*img.*?src\s*=\s*"(.*?)".*?\s*\/?>/', $text, $matches, PREG_SET_ORDER, 0);
         $output = array();
-        foreach ($matches as $imgData) {
+        foreach ($matches as $key => $imgData) {
             //Get the position of the img answer to split the message
             $imgPosition = strpos($text, $imgData[0]);
+            $firstTextPosition = 0;
+
+            if ($imgPosition == 0) {
+                $imgPosition = isset($matches[$key + 1]) ? strpos($text, $matches[$key + 1][0]) : strlen($text);
+                $firstTextPosition = strlen($imgData[0]);
+            }
 
             // Append first text-part of the message to the answer
-            $firstText = substr($text, 0, $imgPosition);
+            $firstText = substr($text, $firstTextPosition, $imgPosition);
             if (strlen($firstText)) {
-                $output[] = array('type' => 'text', 'text' => $firstText);
+                $output[] = [
+                    'type' => 'text',
+                    'text' => $firstText
+                ];
             }
 
             //Append the image to the answer
-            $output[] = array(
+            $output[] = [
                 'type' => 'image',
-                'image' => array(
+                'image' => [
                     'url' => $imgData[1]
-                )
-            );
+                ]
+            ];
 
             //Remove the <img> part from the input string
             $position = $imgPosition + strlen($imgData[0]);
@@ -344,9 +514,54 @@ class NexmoDigester extends DigesterInterface
 
         //Check if there is missing text inside message
         if (strlen($text)) {
-            $output[] = array(
+            $output[] = [
+                'type' => 'text',
                 'text' => $text
-            );
+            ];
+        }
+        $output["text_carried"] = $text;
+        return $output;
+    }
+
+    /**
+     * Extracts the url from the iframe
+     */
+    private function handleMessageWithIframe($text)
+    {
+        //Capture all IMG tags and return an array with [text,imageURL,text,...]
+        $parts = preg_split('/<\s*iframe.*?src\s*=\s*"(.+?)".*?\s*\/?>/', $text, -1, PREG_SPLIT_NO_EMPTY | PREG_SPLIT_DELIM_CAPTURE);
+        $output = [];
+        foreach ($parts as $part) {
+
+            if (substr($part, 0, 4) == 'http') {
+                $url_elements = explode(".", $part);
+                $file_format = $url_elements[count($url_elements) - 1];
+                if (in_array($file_format, $this->attachableFormats)) {
+                    $type = 'file';
+                    if (in_array($file_format, ['jpg', 'jpeg', 'png', 'gif'])) {
+                        $type = 'image';
+                    } else if (in_array($file_format, ['mp4', 'avi'])) {
+                        $type = 'video';
+                    } else if (in_array($file_format, ['mp3', 'aac'])) {
+                        $type = 'audio';
+                    }
+
+                    $output[] = [
+                        'type' => $type,
+                        $type => [
+                            'url' => $part
+                        ]
+                    ];
+                } else {
+                    $pos1 = strpos($text, "<iframe");
+                    $pos2 = strpos($text, "</iframe>", $pos1);
+                    $iframe = substr($text, $pos1, $pos2 - $pos1 + 9);
+                    $output[] = [
+                        'type' => 'text',
+                        'text' => str_replace($iframe, "<a href='" . $part . "'></a>", $text)
+                    ];
+                }
+            }
         }
         return $output;
     }
@@ -396,5 +611,170 @@ class NexmoDigester extends DigesterInterface
             'type' => 'text',
             'text' => $message
         );
+    }
+
+    /**
+     * Validate if the message has action fields
+     */
+    private function handleMessageWithActionField($message, &$message_txt, $lastUserQuestion)
+    {
+        if (isset($message->actionField) && !empty($message->actionField)) {
+            if ($message->actionField->fieldType === 'list') {
+                $options = $this->handleMessageWithListValues($message->actionField->listValues, $lastUserQuestion);
+                if ($options !== "") {
+                    $message_txt .= " (type a number)";
+                    $message_txt .= $options;
+                }
+            } else if ($message->actionField->fieldType === 'datePicker') {
+                $message_txt .= " (date format: mm/dd/YYYY)";
+            }
+        }
+    }
+
+    /**
+     * Validate if the message has related content and put like an option list
+     */
+    private function handleMessageWithRelatedContent($message, &$message_txt, $lastUserQuestion)
+    {
+        if (isset($message->parameters->contents->related->relatedContents) && !empty($message->parameters->contents->related->relatedContents)) {
+            $message_txt .= "\r\n \r\n" . $message->parameters->contents->related->relatedTitle . " (type a number)";
+
+            $options = [];
+            $optionList = "";
+            foreach ($message->parameters->contents->related->relatedContents as $key => $relatedContent) {
+                $options[$key] = (object) [];
+                $options[$key]->opt_key = $key + 1;
+                $options[$key]->related_content = true;
+                $options[$key]->label = $relatedContent->title;
+                $optionList .= "\n\n" . ($key + 1) . ') ' . $relatedContent->title;
+            }
+            if ($optionList !== "") {
+                $message_txt .= $optionList;
+                $this->session->set('hasRelatedContent', true);
+                $this->session->set('options', (object) $options);
+                $this->session->set('lastUserQuestion', $lastUserQuestion);
+            }
+        }
+    }
+
+    /**
+     * Remove the common html tags from the message and set the final message
+     */
+    public function formatFinalMessage($message)
+    {
+        $message = str_replace('&nbsp;', ' ', $message);
+        $message = str_replace(["\t"], '', $message);
+
+        $breaks = array("<br />", "<br>", "<br/>", "<p>");
+        $message = str_ireplace($breaks, "\n", $message);
+
+        $message = strip_tags($message);
+
+        $rows = explode("\n", $message);
+        $message_processed = "";
+        $previous_jump = 0;
+        foreach ($rows as $row) {
+            if ($row == "" && $previous_jump == 0) {
+                $previous_jump++;
+            } else if ($row == "" && $previous_jump == 1) {
+                $previous_jump++;
+                $message_processed .= "\r\n";
+            }
+            if ($row !== "") {
+                $message_processed .= $row . "\r\n";
+                $previous_jump = 0;
+            }
+        }
+        $message_processed = str_replace("  ", " ", $message_processed);
+        return $message_processed;
+    }
+
+    /**
+     * Set the options for message with list values
+     */
+    protected function handleMessageWithListValues($listValues, $lastUserQuestion)
+    {
+        $optionList = "";
+        $options = $listValues->values;
+        foreach ($options as $i => &$option) {
+            $option->opt_key = $i + 1;
+            $option->list_values = true;
+            $option->label = $option->option;
+            $optionList .= "\n" . $option->opt_key . ') ' . $option->label;
+        }
+        if ($optionList !== "") {
+            $this->session->set('options', $options);
+            $this->session->set('lastUserQuestion', $lastUserQuestion);
+        }
+        return $optionList;
+    }
+
+    /**
+     * Format the link as part of the message
+     */
+    public function handleMessageWithLinks(&$message_txt)
+    {
+        if ($message_txt !== "") {
+            $dom = new \DOMDocument();
+            @$dom->loadHTML($message_txt);
+            $nodes = $dom->getElementsByTagName('a');
+
+            $urls = [];
+            $value = [];
+            foreach ($nodes as $node) {
+                $urls[] = $node->getAttribute('href');
+                $value[] = trim($node->nodeValue);
+            }
+
+            if (strpos($message_txt, '<a ') !== false && count($urls) > 0) {
+                $count_links = substr_count($message_txt, "<a ");
+                $last_position = 0;
+                for ($i = 0; $i < $count_links; $i++) {
+                    $first_position = strpos($message_txt, "<a ", $last_position);
+                    $last_position = strpos($message_txt, "</a>", $first_position);
+
+                    if (isset($urls[$i]) && $last_position > 0) {
+                        $a_tag = substr($message_txt, $first_position, $last_position - $first_position + 4);
+                        $text_to_replace = $value[$i] !== "" ? $value[$i] . " (" . $urls[$i] . ")" : $urls[$i];
+                        $message_txt = str_replace($a_tag, $text_to_replace, $message_txt);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Format the text if is bold, italic or strikethrough
+     */
+    public function handleMessageWithTextFormat(&$message_txt)
+    {
+        $tagsAccepted = ['strong', 'b', 'em', 's'];
+        foreach ($tagsAccepted as $tag) {
+            if (strpos($message_txt, '<' . $tag . '>') !== false) {
+
+                $replace_char = "*"; //*bold*
+                if ($tag === "em") $replace_char = "_"; //_italic_
+                else if ($tag === "s") $replace_char = "~"; //~strikethrough~
+
+                $count_tags = substr_count($message_txt, "<" . $tag . ">");
+
+                $last_position = 0;
+                $tag_array = [];
+                for ($i = 0; $i < $count_tags; $i++) {
+                    $first_position = strpos($message_txt, "<" . $tag . ">", $last_position);
+                    $last_position = strpos($message_txt, "</" . $tag . ">", $first_position);
+                    if ($last_position > 0) {
+                        $tag_length = strlen($tag) + 3;
+                        $tag_array[] = substr($message_txt, $first_position, $last_position - $first_position + $tag_length);
+                    }
+                }
+                foreach ($tag_array as $old_tag) {
+                    $new_tag = str_replace("<" . $tag . ">", "", $old_tag);
+                    $new_tag = str_replace("</" . $tag . ">", "", $new_tag);
+                    $new_tag = $replace_char . trim($new_tag) . $replace_char . " ";
+                    $message_txt = str_replace($old_tag, $new_tag, $message_txt);
+                }
+            }
+        }
     }
 }
