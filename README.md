@@ -7,8 +7,8 @@ This template includes **/conf** and **/lang** folders, which have all the confi
 This bot template inherits the functionalities from the `ChatbotConnector` library. Currently, the features provided by this application are:
 
 * Simple answers
-* Multiple options with a limit of 3 elements (without buttons, selected by text).
-* Polar questions (without buttons, selected by text).
+* Multiple options with a limit of 3 elements (without buttons, selected by text or numbered option).
+* Polar questions (without buttons, selected by text or numbered option).
 * Chained answers.
 * Content ratings (yes/no + comment, without buttons, selected by text).
 * Escalate to HyperChat after a number of no-results answers.
