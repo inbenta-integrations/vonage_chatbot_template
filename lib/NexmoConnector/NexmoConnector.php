@@ -26,16 +26,9 @@ class NexmoConnector extends ChatbotConnector
             $request = file_get_contents('php://input');
             $conversationConf = array('configuration' => $this->conf->get('conversation.default'), 'userType' => $this->conf->get('conversation.user_type'), 'environment' => $this->environment);
             $this->session = new SessionManager($this->getExternalIdFromRequest());
-            $this->botClient     = new ChatbotAPIClient($this->conf->get('api.key'), $this->conf->get('api.secret'), $this->session, $conversationConf);
+            $this->validatePreviousMessages($request);
 
-            $requestDecode = json_decode($request);
-            if (isset($requestDecode->message_uuid)) {
-                //Prevent double request from Vonage
-                if ($this->session->get('last_message_uuid', "") !== "" && $this->session->get('last_message_uuid', "") === $requestDecode->message_uuid) {
-                    die;
-                }
-                $this->session->set('last_message_uuid', $requestDecode->message_uuid);
-            }
+            $this->botClient     = new ChatbotAPIClient($this->conf->get('api.key'), $this->conf->get('api.secret'), $this->session, $conversationConf);
 
             // Retrieve Nexmo tokens from ExtraInfo and update configuration
             $this->getTokensFromExtraInfo();
@@ -554,5 +547,34 @@ class NexmoConnector extends ChatbotConnector
             $timetable = $this->conf->get('chat.chat.timetable');
         }
         return $timetable;
+    }
+
+
+    /**
+     * Validate if the uuid of the recent message is not previously sent
+     * this prevents double request from Vonage
+     */
+    private function validatePreviousMessages($request)
+    {
+        $requestDecode = json_decode($request);
+        if (isset($requestDecode->message_uuid)) {
+
+            $lastMessagesUuid = $this->session->get('lastMessagesUuid', false);
+            if (!is_array($lastMessagesUuid)) {
+                $lastMessagesUuid = [];
+            }
+            if (in_array($requestDecode->message_uuid, $lastMessagesUuid) ) {
+                die;
+            }
+            $lastMessagesUuid[time()] = $requestDecode->message_uuid;
+
+            foreach ($lastMessagesUuid as $key => $messageSent) {
+                if ((time() - 120) > $key) {
+                    //Deletes the stored incomming messages with more than 120 seconds
+                    unset($lastMessagesUuid[$key]);
+                }
+            }
+            $this->session->set('lastMessagesUuid', $lastMessagesUuid);
+        }
     }
 }
