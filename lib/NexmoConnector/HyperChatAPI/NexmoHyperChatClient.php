@@ -227,79 +227,6 @@ class NexmoHyperChatClient extends HyperChatClient
 	}
 
 	/**
-	 * Overwritten method to add email and extra info data
-	 * Signup a new user or update his/her data if it already exists.
-	 * @param  array    $userData
-	 * @return object
-	 */
-	protected function signupOrUpdateUser($userData)
-	{
-		$user = null;
-
-		$requestBody = array(
-			'name' => $userData['name'],
-		);
-
-		if (!empty($userData['externalId'])) {
-			$requestBody['externalId'] = $userData['externalId'];
-		}
-		if (!empty($userData['extraInfo'])) {
-			$requestBody['extraInfo'] = (object) $userData['extraInfo'];
-		}
-		/*********** CUSTOM ***********/
-		if (!empty($userData['contact'])) {
-			$requestBody['contact'] = $userData['contact'];
-		}
-		/*********** CUSTOM ***********/
-		$response = $this->api->users->signup($requestBody);
-		// if a user with the same externalId already existed, just update its data
-		if (isset($response->error)) {
-			if ($response->error->code === self::USER_ALREADY_EXISTS) {
-				$user = $this->getUserByExternalId($requestBody['externalId']);
-				/*********** CUSTOM ***********/
-				$result = $this->updateUser($user->id, $requestBody);
-				/*********** CUSTOM ***********/
-				$user = $result ? $result : $user;
-			} else {
-				return false;
-			}
-		} else {
-			$user = $response->user;
-		}
-
-		return $user;
-	}
-
-	/**
-	 * Overwritten function to update all user data
-	 * Update a user's data
-	 * @param  string $userId
-	 * @param  array  $data   Data to update
-	 * @return object         User's new data
-	 */
-	protected function updateUser($userId, $data = null)
-	{
-		$payload = ['secret' => $this->config->get('secret')];
-		$requestTrigger = false;
-		if (isset($data['extraInfo'])) {
-			$payload['extraInfo'] = $data['extraInfo'];
-			$requestTrigger = true;
-		}
-		if (isset($data['name'])) {
-			$payload['name'] = $data['name'];
-			$requestTrigger = true;
-		}
-		if (isset($data['contact'])) {
-			$payload['contact'] = $data['contact'];
-			$requestTrigger = true;
-		}
-		if (!$requestTrigger) {
-			return false;
-		}
-		$response = $this->api->users->update($userId, $payload);
-		return (isset($response->user)) ? $response->user : false;
-	}
-	/**
 	 * Attach a survey to the ticket
 	 *
 	 * @param Array $event HyperChat system:info event
@@ -328,35 +255,5 @@ class NexmoHyperChatClient extends HyperChatClient
 		}
 		// Clear chatbot session when chat is closed
 		$this->session->clear();
-	}
-
-	/**
-	 * Debugging
-	 *
-	 */
-	public function sendMessage($data)
-	{
-		// Get the userId for later usage
-		$user = $this->getUserByExternalId($data['user']['externalId']);
-		if (is_null($user)) {
-			return (object) ['error' => 'User does not exist'];
-		}
-
-		$chat = $this->getActiveChat($user);
-		if (is_null($chat)) {
-			return (object) ['error' => 'Chat does not exist, `openChat` first.'];
-		}
-		// Send a message to the chat
-		$response = $this->api->chats->sendMessage($chat->id, [
-			'secret' => $this->config->get('secret'),
-			'chatId' => $chat->id,
-			'sender' => $user->id,
-			'message' => $data['message']
-		]);
-
-		if (isset($response->error)) {
-			return (object) ['error' => 'Sending message failed. ' . $response->error->message];
-		}
-		return $response;
 	}
 }

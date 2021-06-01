@@ -5,7 +5,6 @@ namespace Inbenta\NexmoConnector\ExternalAPI;
 use Exception;
 use GuzzleHttp\Client as Guzzle;
 use Psr\Http\Message\ResponseInterface;
-use Symfony\Component\HttpFoundation\Request;
 
 
 class NexmoAPIClient
@@ -103,7 +102,6 @@ class NexmoAPIClient
 	 */
 	public function send($message)
 	{
-
 		$response = $this->nexmo('POST', 'messages/', [
 			'json' => $message,
 		]);

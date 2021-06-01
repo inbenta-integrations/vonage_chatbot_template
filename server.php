@@ -4,7 +4,7 @@ require "vendor/autoload.php";
 
 use Inbenta\NexmoConnector\NexmoConnector;
 
-//Instance new FacebookConnector
+//Instance new NexmoConnector
 $appPath=__DIR__.'/';
 $app = new NexmoConnector($appPath);
 

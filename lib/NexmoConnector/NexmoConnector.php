@@ -9,7 +9,6 @@ use Inbenta\ChatbotConnector\ChatbotAPI\ChatbotAPIClient;
 use Inbenta\NexmoConnector\ExternalAPI\NexmoAPIClient;
 use Inbenta\NexmoConnector\ExternalDigester\NexmoDigester;
 use Inbenta\NexmoConnector\HyperChatAPI\NexmoHyperChatClient;
-use \Firebase\JWT\JWT; // https://github.com/firebase/php-jwt
 use Spatie\OpeningHours\OpeningHours;
 use Inbenta\NexmoConnector\Helpers\Helper;
 
@@ -104,6 +103,7 @@ class NexmoConnector extends ChatbotConnector
         }
         return $externalId;
     }
+
     /**
      * Return if the environment has been set as Sandbox
      *
@@ -233,7 +233,6 @@ class NexmoConnector extends ChatbotConnector
     protected function handleRating($userAnswer = null)
     {
         // Ask the user if wants to escalate
-
         // Handle user response to an rating question
         $this->session->set('askingRating', false);
         $ratingOptions = $this->conf->get('conversation.content_ratings.ratings');
@@ -241,15 +240,18 @@ class NexmoConnector extends ChatbotConnector
         $event = null;
 
         if (count($userAnswer) && isset($userAnswer[0]['message']) && $ratingCode) {
-            foreach ($ratingOptions as $option) {
-                if (Helper::removeAccentsToLower($userAnswer[0]['message']) === Helper::removeAccentsToLower($this->lang->translate($option['label']))) {
+            foreach ($ratingOptions as $index => $option) {
+                if ($index + 1 == (int) $userAnswer[0]['message'] || Helper::removeAccentsToLower($userAnswer[0]['message']) === Helper::removeAccentsToLower($this->lang->translate($option['label']))) {
                     $event = $this->formatRatingEvent($ratingCode, $option['id']);
+                    if (isset($option["comment"]) && $option["comment"]) {
+                        $this->session->set('askingRatingComment', $event);
+                    }
+                    break;
                 }
             }
             // Rate if the answer was correct
             if ($event) {
-                $this->sendEventToBot($event);
-                $this->sendMessagesToExternal($this->buildTextMessage($this->lang->translate('thanks')));
+                $this->sendMessagesToExternal($this->sendEventToBot($event));
                 die;
             }
         }
@@ -274,72 +276,12 @@ class NexmoConnector extends ChatbotConnector
         ];
     }
 
-    /**
-     * 	Ask the user if wants to talk with a human and handle the answer
-     */
-    protected function handleEscalation($userAnswer = null)
-    {
-        // escalate if it has the form done
-        $this->escalateIfFormHasBeenDone();
-
-        // Ask the user if wants to escalate
-        if (!$this->session->get('askingForEscalation', false)) {
-            if ($this->checkAgents()) {
-                // Ask the user if wants to escalate
-                $this->session->set('askingForEscalation', true);
-                $escalationMessage = $this->digester->buildEscalationMessage();
-                $this->externalClient->sendMessage($escalationMessage);
-            } else {
-                // Send no-agents-available message if the escalation trigger is an API flag (user asked for having a chat explicitly)
-                if ($this->session->get('escalationType') == static::ESCALATION_API_FLAG) {
-                    $this->sendMessagesToExternal($this->buildTextMessage($this->lang->translate('no_agents')));
-                }
-                // Because no agents available, reduce the current escalation counter to escalate on next counter update
-                $this->reduceCurrentEscalationCounter();
-                $this->trackContactEvent("CONTACT_UNATTENDED");
-            }
-        } else {
-            // Handle user response to an escalation question
-            $this->session->set('askingForEscalation', false);
-            // Reset escalation counters
-            $this->session->set('noResultsCount', 0);
-            $this->session->set('negativeRatingCount', 0);
-
-            if ((count($userAnswer) && isset($userAnswer[0]['message']))) {
-
-                if (Helper::removeAccentsToLower($userAnswer[0]['message']) === Helper::removeAccentsToLower($this->lang->translate('yes'))) {
-                    $this->escalateToAgent();
-                } else {
-                    $this->sendMessagesToExternal($this->buildTextMessage($this->lang->translate('escalation_rejected')));
-                    $this->trackContactEvent("CONTACT_REJECTED");
-                }
-                die();
-            }
-        }
-    }
-    /**
-     * Escalate to an agent if the escalation form has been done
-     *
-     * @return void
-     */
-    public function escalateIfFormHasBeenDone()
-    {
-        $escalationFormData = $this->session->get('escalationForm', false);
-        if ($escalationFormData) {
-            if ($escalationFormData) {
-                $this->externalClient->setFullName($escalationFormData->FIRST_NAME . ' ' . $escalationFormData->LAST_NAME);
-                $this->externalClient->setEmail($escalationFormData->EMAIL_ADDRESS);
-                $this->externalClient->setExtraInfo((array) $escalationFormData);
-            }
-            $this->escalateToAgent();
-            die;
-        }
-    }
 
     private function isCloseChatCommand($userMessage)
     {
         return $userMessage[0]['message'] === $this->lang->translate('close_chat_key_word') ? true : false;
     }
+
     /**
      * Direct call to sys-welcome message to force escalation
      *
@@ -350,7 +292,7 @@ class NexmoConnector extends ChatbotConnector
     {
         $needEscalation = false;
         $needContentRating = false;
-
+        $hasFormData = false;
         foreach ($externalRequest as $message) {
             // if the session just started throw sys-welcome message
             if ($this->isOnlyChat()) {
@@ -383,16 +325,18 @@ class NexmoConnector extends ChatbotConnector
             $botResponse = $this->sendMessageToBot($message);
             // Check if escalation to agent is needed
             $needEscalation = $this->checkEscalation($botResponse) ? true : $needEscalation;
+            if ($needEscalation) {
+                $this->deleteLastMessage($botResponse);
+            }
             // ONLY CHAT CUSTOM Clear session after escalate if the chatbot message returns a no-subset-match
             if ($this->isOnlyChat()) {
                 $botResponse = $this->checkNoSubsetMatchAndResetSession($botResponse);
             }
-
+            // Check if it has attached an escalation form
+            $hasFormData = $this->checkEscalationForm($botResponse);
             // Check if is needed to display content ratings
             $hasRating = $this->checkContentRatings($botResponse);
             $needContentRating = $hasRating ? $hasRating : $needContentRating;
-            // Check if it has attached an escalation form
-            $hasFormData = $this->checkEscalationForm($botResponse);
             // ONLY CHAT CUSTOM Clear session after escalate
             if ($this->isOnlyChat()) {
                 $this->resetSessionAfterEscalation($botResponse);
@@ -403,8 +347,8 @@ class NexmoConnector extends ChatbotConnector
         if ($needEscalation || $hasFormData) {
             $this->handleEscalation();
         }
-        // Display content rating if needed and not in chat nor asking to escalate
-        if ($needContentRating && !$this->chatOnGoing() && !$this->session->get('askingForEscalation', false)) {
+        // Display content rating if needed and not in chat nor asking to: escalate, related content, options, etc
+        if ($needContentRating && !$this->chatOnGoing() && !$this->session->get('askingForEscalation', false) && !$this->session->get('hasRelatedContent', false) && !$this->session->get('options', false)) {
             $this->displayContentRatings($needContentRating);
         }
     }
@@ -449,67 +393,6 @@ class NexmoConnector extends ChatbotConnector
         return false;
     }
 
-    public function checkEscalationForm($botResponse)
-    {
-        // Parse bot messages
-        if (isset($botResponse->answers) && is_array($botResponse->answers)) {
-            $messages = $botResponse->answers;
-        } else {
-            $messages = array($botResponse);
-        }
-        // Check if BotApi returned 'escalate' flag on message or triesBeforeEscalation has been reached
-        foreach ($messages as $msg) {
-            $this->updateNoResultsCount($msg);
-            $resetSession  = isset($msg->actions) && isset($msg->actions);
-            if ($resetSession && $msg->actions[0]->parameters->callback == "escalateToAgent") {
-                $data = $msg->actions[0]->parameters->data;
-                $this->session->set('escalationForm', $data);
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * Overwritten to add custom user data
-     * 	Tries to start a chat with an agent
-     */
-    protected function escalateToAgent()
-    {
-        $agentsAvailable = $this->checkAgents();
-
-        if ($agentsAvailable) {
-            // Start chat
-            $this->sendMessagesToExternal($this->buildTextMessage($this->lang->translate('creating_chat')));
-            // Build user data for HyperChat API
-
-            // CUSTOM
-            $chatData = array(
-                'roomId' => $this->conf->get('chat.chat.roomId'),
-                'user' => array(
-                    'name'             => $this->externalClient->getFullName(),
-                    'contact'         => $this->externalClient->getEmail(),
-                    'externalId'     => $this->externalClient->getExternalId(),
-                    'extraInfo'     => $this->externalClient->getExtraInfo(),
-                )
-            );
-            $response =  $this->chatClient->openChat($chatData);
-            if (!isset($response->error) && isset($response->chat)) {
-                $this->session->set('chatOnGoing', $response->chat->id);
-                $this->session->set('chatInvitationAccepted', false);
-                $this->trackContactEvent("CONTACT_ATTENDED");
-            } else {
-                $this->sendMessagesToExternal($this->buildTextMessage($this->lang->translate('error_creating_chat')));
-            }
-        } else {
-            // Send no-agents-available message if the escalation trigger is an API flag (user asked for having a chat explicitly)
-            if ($this->session->get('escalationType') == static::ESCALATION_API_FLAG) {
-                $this->sendMessagesToExternal($this->buildTextMessage($this->lang->translate('no_agents')));
-            }
-            $this->trackContactEvent("CONTACT_UNATTENDED");
-            $this->session->clear();
-        }
-    }
 
     /**
      * Check the Agents timetable
@@ -549,7 +432,6 @@ class NexmoConnector extends ChatbotConnector
         return $timetable;
     }
 
-
     /**
      * Validate if the uuid of the recent message is not previously sent
      * this prevents double request from Vonage
@@ -557,24 +439,26 @@ class NexmoConnector extends ChatbotConnector
     private function validatePreviousMessages($request)
     {
         $requestDecode = json_decode($request);
-        if (isset($requestDecode->message_uuid)) {
+        if (isset($requestDecode->message_uuid) && isset($requestDecode->message)) {
 
             $lastMessagesUuid = $this->session->get('lastMessagesUuid', false);
             if (!is_array($lastMessagesUuid)) {
                 $lastMessagesUuid = [];
             }
-            if (in_array($requestDecode->message_uuid, $lastMessagesUuid) ) {
+            if (in_array($requestDecode->message_uuid, $lastMessagesUuid)) {
                 die;
             }
             $lastMessagesUuid[time()] = $requestDecode->message_uuid;
 
             foreach ($lastMessagesUuid as $key => $messageSent) {
-                if ((time() - 120) > $key) {
-                    //Deletes the stored incomming messages with more than 120 seconds
+                if ((time() - 240) > $key) {
+                    //Deletes the stored incomming messages with more than 240 seconds
                     unset($lastMessagesUuid[$key]);
                 }
             }
             $this->session->set('lastMessagesUuid', $lastMessagesUuid);
+        } else if (!isset($requestDecode->trigger)) {
+            die;
         }
     }
 }

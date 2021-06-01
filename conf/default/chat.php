@@ -16,12 +16,10 @@ return [
         'source' => 3,             // Numeric value, no string (without quotes)
         'guestName' => '',
         'guestContact' => '',
+        'regionServer' => 'us',     // Region of the Hyperchat server URL
         'server' => 'https://hyperchat-REGION.inbenta.chat',    // Change "REGION" with your Hyperchat server region
         'server_port' => 443,
         'surveyId' => '',
-        'queue' => [
-            'active' => true
-        ],
         'timetable' => [
             'monday'     => ['09:00-18:00'],
             'tuesday'    => ['09:00-18:00'],

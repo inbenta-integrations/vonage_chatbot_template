@@ -23,6 +23,7 @@ return [
         'lang'  => 'en'
     ],
     'user_type' => 0,
+    'source' => 'vonage',
     'content_ratings' => [     // Remember that these ratings need to be created in your instance
         'enabled' => false,
         'ratings' => [

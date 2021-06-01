@@ -4,6 +4,7 @@ namespace Inbenta\NexmoConnector\ExternalDigester;
 
 use \Exception;
 use Inbenta\ChatbotConnector\ExternalDigester\Channels\DigesterInterface;
+use Inbenta\NexmoConnector\Helpers\Helper;
 
 
 class NexmoDigester extends DigesterInterface
@@ -15,10 +16,18 @@ class NexmoDigester extends DigesterInterface
     protected $langManager;
     protected $externalMessageTypes = array(
         'text',
-        'attachment',
+        'image',
+        'audio',
+        'video',
+        'file',
         'location'
     );
-    protected $attachableFormats = ['jpg', 'jpeg', 'png', 'gif', 'pdf', 'xls', 'xlsx', 'mp4', 'avi', 'mp3', 'aac'];
+    protected $attachableFormats = [
+        'file' => ['pdf', 'xls', 'xlsx', 'doc', 'docx'],
+        'image' => ['jpg', 'jpeg', 'png', 'gif'], 
+        'video' => ['mp4', 'avi'], 
+        'audio' => ['mp3', 'aac']
+    ];
 
     public function __construct($langManager, $conf, $session)
     {
@@ -88,7 +97,10 @@ class NexmoDigester extends DigesterInterface
                     } else if (isset($option->is_polar)) {
                         $isPolar = true;
                     }
-                    if ($userMessage == $option->opt_key || strtolower($userMessage) == strtolower($option->label)) {
+                    if (
+                        $userMessage == $option->opt_key ||
+                        Helper::removeAccentsToLower($userMessage) === Helper::removeAccentsToLower($this->langManager->translate($option->label))
+                    ) {
                         if ($isListValues || $isRelatedContent) {
                             $selectedOptionText = $option->label;
                         } else {
@@ -101,10 +113,17 @@ class NexmoDigester extends DigesterInterface
 
                 if (!$optionSelected) {
                     if ($isListValues) { //Set again options for variable
-                        $this->session->set('options', $options);
-                        $this->session->set('lastUserQuestion', $lastUserQuestion);
+                        if ($this->session->get('optionListValues', 0) < 1) { //Make sure only enters here just once
+                            $this->session->set('options', $options);
+                            $this->session->set('lastUserQuestion', $lastUserQuestion);
+                            $this->session->set('optionListValues', 1);
+                        } else {
+                            $this->session->delete('options');
+                            $this->session->delete('lastUserQuestion');
+                            $this->session->delete('optionListValues');
+                        }
                     } else if ($isPolar) { //For polar, on wrong answer, goes for NO
-                        $request->message->content->text = "No";
+                        $output[] = ['message' => $this->langManager->translate('no')];
                     }
                 }
 
@@ -124,15 +143,27 @@ class NexmoDigester extends DigesterInterface
                     case 'text':
                         $digestedMessage = $this->digestFromNexmoText($msg);
                         break;
-                    case 'attachment':
+                    case 'image':
+                    case 'audio':
+                    case 'video':
+                    case 'file':
                         $digestedMessage = $this->digestFromNexmoAttachment($msg);
                         break;
                     case 'location':
                         $digestedMessage = $this->digestFromNexmoLocation($msg);
                         break;
                 }
+                if (isset($digestedMessage['url']) && $digestedMessage['url'] !== '') { //File attachment
+                    $caption = isset($digestedMessage['caption']) ? $digestedMessage['caption'] : '';
+                    $fileResponse = $this->mediaFileToHyperchat($digestedMessage, $caption);
+                    if (isset($fileResponse['message']) && $fileResponse['message'] !== '') {
+                        $output[]['message'] = $fileResponse['message'];
+                        unset($fileResponse['message']);
+                    }
+                    $output[] = $fileResponse;
+                }
                 //Check if there are more than one responses from one incoming message
-                if (isset($digestedMessage['multiple_output'])) {
+                else if (isset($digestedMessage['multiple_output'])) {
                     foreach ($digestedMessage['multiple_output'] as $message) {
                         $output[] = $message;
                     }
@@ -199,8 +230,11 @@ class NexmoDigester extends DigesterInterface
                 case 'text':
                     $responseType = $this->isNexmoText($message) ? $type : "";
                     break;
-                case 'attachment':
-                    $responseType = $this->isNexmoAttachment($message) ? $type : "";
+                case 'image':
+                case 'audio':
+                case 'video':
+                case 'file':
+                    $responseType = $this->isNexmoAttachment($message, $type) ? $type : "";
                     break;
                 case 'location':
                     $responseType = $this->isNexmoLocation($message) ? $type : "";
@@ -252,22 +286,11 @@ class NexmoDigester extends DigesterInterface
         return $isText;
     }
 
-    protected function isNexmoAttachment($message)
+    protected function isNexmoAttachment($message, $type)
     {
         $isAttachment = false;
-        if (
-            isset($message->message)
-            && isset($message->message->content)
-            && isset($message->message->content->type)
-        ) {
-            switch ($message->message->content->type) {
-                case 'image':
-                case 'audio':
-                case 'video':
-                case 'file':
-                    $isAttachment = true;
-                    break;
-            }
+        if (isset($message->message->content->type) && $message->message->content->type == $type) {
+            $isAttachment = true;
         }
         return $isAttachment;
     }
@@ -321,11 +344,16 @@ class NexmoDigester extends DigesterInterface
 
     protected function digestFromNexmoAttachment($message)
     {
-        $type =  $message->message->content->type;
-        return array(
-            'message' => $message->message->content->$type->url
-        );
+        $type = $message->message->content->type;
+        $response = [
+            'url' => $message->message->content->$type->url
+        ];
+        if (isset($message->message->content->$type->caption) && $message->message->content->$type->caption !== '') {
+            $response['caption'] = $message->message->content->$type->caption;
+        }
+        return $response;
     }
+
     protected function digestFromNexmoLocation($message)
     {
         $data = $message->message->content->location;
@@ -436,12 +464,14 @@ class NexmoDigester extends DigesterInterface
 
     public function buildContentRatingsMessage($ratingOptions, $rateCode)
     {
-
         $message = $this->langManager->translate('rate_content_intro');
         $response['multiple_output'][] = ['type' => 'text', 'text' => $message];
-
-        foreach ($ratingOptions as $option) {
-            $response['multiple_output'][] = ['type' => 'text', 'text' =>  $this->langManager->translate($option['label'])];
+        $options = '';
+        foreach ($ratingOptions as $index => $option) {
+            $options .= "\n" . ($index + 1) . ") " . $this->langManager->translate($option['label']);
+        }
+        if ($options !== '') {
+            $response['multiple_output'][] = ['type' => 'text', 'text' => $options];
         }
         return $response;
     }
@@ -534,18 +564,16 @@ class NexmoDigester extends DigesterInterface
         foreach ($parts as $part) {
 
             if (substr($part, 0, 4) == 'http') {
-                $url_elements = explode(".", $part);
-                $file_format = $url_elements[count($url_elements) - 1];
-                if (in_array($file_format, $this->attachableFormats)) {
-                    $type = 'file';
-                    if (in_array($file_format, ['jpg', 'jpeg', 'png', 'gif'])) {
-                        $type = 'image';
-                    } else if (in_array($file_format, ['mp4', 'avi'])) {
-                        $type = 'video';
-                    } else if (in_array($file_format, ['mp3', 'aac'])) {
-                        $type = 'audio';
+                $urlElements = explode(".", $part);
+                $fileFormat = $urlElements[count($urlElements) - 1];
+                $type = '';
+                foreach ($this->attachableFormats as $attachableType => $attachableFormat) {
+                    if (in_array($fileFormat, $attachableFormat)) {
+                        $type = $attachableType;
+                        break;
                     }
-
+                }
+                if ($type !== '') {
                     $output[] = [
                         'type' => $type,
                         $type => [
@@ -777,4 +805,55 @@ class NexmoDigester extends DigesterInterface
             }
         }
     }
+
+    /**
+     * Check if Hyperchat is running and if the attached file is correct
+     * @param array $request
+     * @return array $output
+     */
+    protected function mediaFileToHyperchat(array $request, string $caption = '')
+    {
+        $output = ['message' => ''];
+        if ($this->session->get('chatOnGoing', false)) 
+        {
+            $mediaFile = $this->getMediaFile($request['url']);
+            if ($mediaFile !== "") {
+                $output = ['media' => $mediaFile];
+                if ($caption !== '') {
+                    $output['message'] = $caption;
+                }
+            }
+        }
+        return $output;
+    }
+
+    /**
+     * Get the media file from the Vonage response, 
+     * save file into temporal directory to sent to Hyperchat
+     * @param string $fileUrl
+     */
+    protected function getMediaFile(string $fileUrl)
+    {
+        $buffer = file_get_contents($fileUrl);
+        $finfo = new \finfo(FILEINFO_MIME_TYPE);
+        $fileType = $finfo->buffer($buffer);
+
+        $format = explode("/", $fileType);
+        
+        if (isset($format[1])) {
+            foreach ($this->attachableFormats as $attachableFormat) {
+                if (in_array($format[1], $attachableFormat)) {
+                    $fileName = sys_get_temp_dir(). "/file.".$format[1];
+                    $tmpFile = fopen($fileName, "w") or die;
+                    fwrite($tmpFile, $buffer);
+                    $fileRaw = fopen($fileName, 'r');
+                    @unlink($fileName);
+
+                    return $fileRaw;
+                }
+            }
+        }
+        return "";
+    }
+
 }
